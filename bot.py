@@ -353,13 +353,17 @@ async def _artist_card(update: Update, ctx: ContextTypes.DEFAULT_TYPE,
 
     markup = InlineKeyboardMarkup(kb) if kb else None
     if artist["photo_id"]:
-        await update.effective_message.reply_photo(
-            artist["photo_id"], caption=text, reply_markup=markup, parse_mode="HTML"
-        )
-    else:
-        await update.effective_message.reply_text(
-            text, reply_markup=markup, parse_mode="HTML"
-        )
+        try:
+            await update.effective_message.reply_photo(
+                artist["photo_id"], caption=text, reply_markup=markup, parse_mode="HTML"
+            )
+            return
+        except Exception:
+            # photo_id от старого бота — показываем без фото
+            pass
+    await update.effective_message.reply_text(
+        text, reply_markup=markup, parse_mode="HTML"
+    )
 
 
 async def _is_moderator(ctx: ContextTypes.DEFAULT_TYPE, user_id: int) -> bool:
@@ -891,11 +895,14 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
             InlineKeyboardButton("✏️ Редактировать", callback_data="edit_profile")
         ]])
         if a.get("photo_id"):
-            await update.message.reply_photo(
-                a["photo_id"], caption=card, reply_markup=kb, parse_mode="HTML"
-            )
-        else:
-            await update.message.reply_text(card, reply_markup=kb, parse_mode="HTML")
+            try:
+                await update.message.reply_photo(
+                    a["photo_id"], caption=card, reply_markup=kb, parse_mode="HTML"
+                )
+                return
+            except Exception:
+                pass
+        await update.message.reply_text(card, reply_markup=kb, parse_mode="HTML")
 
     elif text == "мои подписки 📋":
         with _db() as c:
