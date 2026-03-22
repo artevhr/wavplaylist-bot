@@ -417,6 +417,7 @@ async def _show_artist_card(
 
 async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     uid = update.effective_user.id
+    logger.info("START from user %s", uid)
     ensure_artist(uid)
 
     if ctx.args:
@@ -554,8 +555,18 @@ async def upload_file(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
 
 
 async def upload_cancel(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
-    await update.message.reply_text("Отменено. /start чтобы начать заново.")
+    ctx.user_data.clear()
+    await update.message.reply_text("Отменено. Напиши /start чтобы начать заново.")
     return ConversationHandler.END
+
+
+async def cmd_cancel_global(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """Глобальный /cancel — сбрасывает любое состояние."""
+    ctx.user_data.clear()
+    uid = update.effective_user.id
+    artist = get_artist(uid)
+    is_a = artist and artist["first_song"] == 1
+    await _send_main_menu(update, "✅ Сброшено. Вот главное меню:", is_a)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -891,6 +902,7 @@ async def handle_rejection_in_group(update: Update, ctx: ContextTypes.DEFAULT_TY
 async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     uid  = update.effective_user.id
     text = (update.message.text or "").strip()
+    logger.info("TEXT from user %s: %r", uid, text[:50])
 
     # ── Menu: my card ──────────────────────────────────────────────────────────
     if text == "моя карточка 👤":
@@ -1152,10 +1164,11 @@ def main() -> None:
         allow_reentry=True,
     )
 
-    app.add_handler(CommandHandler("start",   cmd_start,   filters=PRIVATE))
+    app.add_handler(CommandHandler("start",   cmd_start,      filters=PRIVATE))
+    app.add_handler(CommandHandler("cancel",  cmd_cancel_global, filters=PRIVATE))
     app.add_handler(CommandHandler("stats",   cmd_stats))
     app.add_handler(CommandHandler("pending", cmd_pending))
-    app.add_handler(CommandHandler("import_db", cmd_import_db))  # одноразовый импорт
+    app.add_handler(CommandHandler("import_db", cmd_import_db))
     app.add_handler(upload_conv)
     app.add_handler(profile_conv)
     app.add_handler(CallbackQueryHandler(
