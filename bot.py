@@ -1027,6 +1027,80 @@ async def cmd_pending(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+#  ONE-TIME DB IMPORT  (/import_db — только для ADMIN_IDS, удали после переноса)
+# ══════════════════════════════════════════════════════════════════════════════
+
+async def cmd_import_db(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    if update.effective_user.id not in ADMIN_IDS:
+        return
+    if not update.message.document:
+        await update.message.reply_text(
+            "Пришли файл export.json — он лежит в том же архиве что и bot.py"
+        )
+        return
+
+    await update.message.reply_text("⏳ Импортирую...")
+
+    tg_file = await ctx.bot.get_file(update.message.document.file_id)
+    with urllib.request.urlopen(tg_file.file_path, timeout=30) as r:
+        data = json.loads(r.read())
+
+    artists_ok = tracks_ok = subs_ok = 0
+
+    with _db() as conn:
+        for row in data.get("artists", []):
+            try:
+                conn.execute("""
+                    INSERT OR IGNORE INTO artists
+                    (user_id, slug, name, bio, photo_id, links,
+                     is_allowed, first_song, subscribers_count, created_at)
+                    VALUES (?,?,?,?,?,?,?,?,?,?)
+                """, (
+                    row["user_id"], row["slug"], row.get("name"), row.get("bio"),
+                    row.get("photo_id"), row.get("links"),
+                    row.get("is_allowed", 0), row.get("first_song", 0),
+                    row.get("subscribers_count", 0), row.get("created_at"),
+                ))
+                artists_ok += 1
+            except Exception as e:
+                logger.warning("artist skip %s: %s", row.get("user_id"), e)
+
+        for row in data.get("tracks", []):
+            try:
+                conn.execute("""
+                    INSERT OR IGNORE INTO tracks
+                    (user_id, track_name, file_id, channel_url, published_at)
+                    VALUES (?,?,?,?,?)
+                """, (
+                    row["user_id"], row["track_name"], row.get("file_id"),
+                    row.get("track_url", ""),   # старое поле → channel_url
+                    row.get("published_at"),
+                ))
+                tracks_ok += 1
+            except Exception as e:
+                logger.warning("track skip %s: %s", row.get("track_name"), e)
+
+        for row in data.get("subscriptions", []):
+            try:
+                conn.execute("""
+                    INSERT OR IGNORE INTO subscriptions (subscriber_id, artist_id, created_at)
+                    VALUES (?,?,?)
+                """, (row["subscriber_id"], row["artist_id"], row.get("created_at")))
+                subs_ok += 1
+            except Exception as e:
+                logger.warning("sub skip: %s", e)
+
+    await update.message.reply_text(
+        f"✅ <b>Импорт завершён!</b>\n\n"
+        f"👤 Артистов: <b>{artists_ok}</b>\n"
+        f"🎵 Треков: <b>{tracks_ok}</b>\n"
+        f"❤️ Подписок: <b>{subs_ok}</b>\n\n"
+        f"Команду /import_db можно удалить из кода.",
+        parse_mode="HTML",
+    )
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 #  MAIN
 # ══════════════════════════════════════════════════════════════════════════════
 
@@ -1079,17 +1153,16 @@ def main() -> None:
     )
 
     app.add_handler(CommandHandler("start",   cmd_start,   filters=PRIVATE))
-    app.add_handler(CommandHandler("stats",   cmd_stats))   # работает и в группе
-    app.add_handler(CommandHandler("pending", cmd_pending)) # работает и в группе
+    app.add_handler(CommandHandler("stats",   cmd_stats))
+    app.add_handler(CommandHandler("pending", cmd_pending))
+    app.add_handler(CommandHandler("import_db", cmd_import_db))  # одноразовый импорт
     app.add_handler(upload_conv)
     app.add_handler(profile_conv)
     app.add_handler(CallbackQueryHandler(
         handle_callback,
         pattern=r"^(approve|reject|sub|unsub|disc|card|show)_",
     ))
-    # Общий текстовый хендлер — только личка
     app.add_handler(MessageHandler(PRIVATE & filters.TEXT & ~filters.COMMAND, handle_text))
-    # Причина отклонения — только из группы модерации или лички админа
     app.add_handler(MessageHandler(
         (filters.Chat(MODERATION_CHAT_ID) | filters.Chat(list(ADMIN_IDS))) & filters.TEXT & ~filters.COMMAND,
         handle_rejection_in_group,
