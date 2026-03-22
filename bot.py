@@ -860,28 +860,18 @@ def _edit_caption(query, suffix: str):
 #  ADMIN REJECTION REASON HANDLER
 # ══════════════════════════════════════════════════════════════════════════════
 
-async def handle_admin_rejection(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> bool:
-    """Returns True if message was consumed as a rejection reason."""
-    # Принимаем причину из группы модерации ИЛИ от ADMIN_ID в личке
-    chat_id   = update.effective_chat.id
+async def handle_rejection_in_group(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """Хендлер группы модерации — ловит причину отклонения от модераторов."""
     sender_id = update.effective_user.id
-    is_from_mod_chat = (chat_id == MODERATION_CHAT_ID)
-    is_from_admin    = (sender_id in ADMIN_IDS and chat_id in ADMIN_IDS)
-
-    if not (is_from_mod_chat or is_from_admin):
-        return False
-
-    waiting = {k: v for k, v in ctx.bot_data.items() if k.startswith("reject_")}
+    waiting   = {k: v for k, v in ctx.bot_data.items() if k.startswith("reject_")}
     if not waiting:
-        return False
-
-    # Доп. проверка: в группе — только модераторы
-    if is_from_mod_chat and not await _is_moderator(ctx, sender_id):
-        return False
+        return
+    if not await _is_moderator(ctx, sender_id):
+        return
 
     key, sub = next(iter(waiting.items()))
-    user_id = sub["from_id"]
-    reason  = update.message.text.strip()
+    user_id  = sub["from_id"]
+    reason   = update.message.text.strip()
 
     msg = f"😔 Трек <b>{sub['title']}</b> был отклонён."
     if reason not in ("—", "-", "нет", "no"):
@@ -892,7 +882,6 @@ async def handle_admin_rejection(update: Update, ctx: ContextTypes.DEFAULT_TYPE)
     await update.message.reply_text("✅ Артист уведомлён об отклонении.")
     pending.pop(user_id, None)
     del ctx.bot_data[key]
-    return True
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -900,10 +889,6 @@ async def handle_admin_rejection(update: Update, ctx: ContextTypes.DEFAULT_TYPE)
 # ══════════════════════════════════════════════════════════════════════════════
 
 async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    # Admin rejection takes absolute priority
-    if await handle_admin_rejection(update, ctx):
-        return
-
     uid  = update.effective_user.id
     text = (update.message.text or "").strip()
 
@@ -1050,22 +1035,24 @@ def main() -> None:
 
     app = Application.builder().token(BOT_TOKEN).build()
 
+    PRIVATE = filters.ChatType.PRIVATE
+
     # Track upload conversation
     upload_conv = ConversationHandler(
         entry_points=[
-            MessageHandler(filters.Regex(r"^отправить трек 📥$"), upload_start),
-            MessageHandler(filters.Regex(r"^отправить файл 📥$"), upload_start),  # back-compat
+            MessageHandler(PRIVATE & filters.Regex(r"^отправить трек 📥$"), upload_start),
+            MessageHandler(PRIVATE & filters.Regex(r"^отправить файл 📥$"), upload_start),
         ],
         states={
-            TITLE:  [MessageHandler(filters.TEXT & ~filters.COMMAND, upload_title)],
-            ARTIST: [MessageHandler(filters.TEXT & ~filters.COMMAND, upload_artist)],
-            ALBUM:  [MessageHandler(filters.TEXT & ~filters.COMMAND, upload_album)],
+            TITLE:  [MessageHandler(PRIVATE & filters.TEXT & ~filters.COMMAND, upload_title)],
+            ARTIST: [MessageHandler(PRIVATE & filters.TEXT & ~filters.COMMAND, upload_artist)],
+            ALBUM:  [MessageHandler(PRIVATE & filters.TEXT & ~filters.COMMAND, upload_album)],
             COVER:  [MessageHandler(
-                (filters.PHOTO | filters.Document.IMAGE | filters.TEXT) & ~filters.COMMAND,
+                PRIVATE & (filters.PHOTO | filters.Document.IMAGE | filters.TEXT) & ~filters.COMMAND,
                 upload_cover,
             )],
             FILE: [MessageHandler(
-                (filters.AUDIO | filters.Document.ALL) & ~filters.COMMAND,
+                PRIVATE & (filters.AUDIO | filters.Document.ALL) & ~filters.COMMAND,
                 upload_file,
             )],
         },
@@ -1074,34 +1061,39 @@ def main() -> None:
     )
 
     # Profile edit conversation
-    # Entry: either "edit_profile" callback or a /profile command
     profile_conv = ConversationHandler(
         entry_points=[
-            CommandHandler("profile", profile_start),
+            CommandHandler("profile", profile_start, filters=PRIVATE),
             CallbackQueryHandler(profile_start, pattern="^edit_profile$"),
         ],
         states={
-            P_NAME:  [MessageHandler(filters.TEXT & ~filters.COMMAND, profile_name)],
-            P_BIO:   [MessageHandler(filters.TEXT & ~filters.COMMAND, profile_bio)],
+            P_NAME:  [MessageHandler(PRIVATE & filters.TEXT & ~filters.COMMAND, profile_name)],
+            P_BIO:   [MessageHandler(PRIVATE & filters.TEXT & ~filters.COMMAND, profile_bio)],
             P_PHOTO: [MessageHandler(
-                (filters.PHOTO | filters.TEXT) & ~filters.COMMAND, profile_photo
+                PRIVATE & (filters.PHOTO | filters.TEXT) & ~filters.COMMAND, profile_photo
             )],
-            P_LINKS: [MessageHandler(filters.TEXT & ~filters.COMMAND, profile_links)],
+            P_LINKS: [MessageHandler(PRIVATE & filters.TEXT & ~filters.COMMAND, profile_links)],
         },
         fallbacks=[CommandHandler("cancel", upload_cancel)],
         allow_reentry=True,
     )
 
-    app.add_handler(CommandHandler("start",   cmd_start))
-    app.add_handler(CommandHandler("stats",   cmd_stats))
-    app.add_handler(CommandHandler("pending", cmd_pending))
+    app.add_handler(CommandHandler("start",   cmd_start,   filters=PRIVATE))
+    app.add_handler(CommandHandler("stats",   cmd_stats))   # работает и в группе
+    app.add_handler(CommandHandler("pending", cmd_pending)) # работает и в группе
     app.add_handler(upload_conv)
     app.add_handler(profile_conv)
     app.add_handler(CallbackQueryHandler(
         handle_callback,
         pattern=r"^(approve|reject|sub|unsub|disc|card|show)_",
     ))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
+    # Общий текстовый хендлер — только личка
+    app.add_handler(MessageHandler(PRIVATE & filters.TEXT & ~filters.COMMAND, handle_text))
+    # Причина отклонения — только из группы модерации или лички админа
+    app.add_handler(MessageHandler(
+        (filters.Chat(MODERATION_CHAT_ID) | filters.Chat(list(ADMIN_IDS))) & filters.TEXT & ~filters.COMMAND,
+        handle_rejection_in_group,
+    ))
 
     logger.info("WAVARCHIVE Bot (merged) starting — polling...")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
