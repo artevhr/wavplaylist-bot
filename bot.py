@@ -1152,6 +1152,7 @@ def main() -> None:
             CommandHandler("profile", profile_start, filters=PRIVATE),
             CallbackQueryHandler(profile_start, pattern="^edit_profile$"),
         ],
+        per_message=False,
         states={
             P_NAME:  [MessageHandler(PRIVATE & filters.TEXT & ~filters.COMMAND, profile_name)],
             P_BIO:   [MessageHandler(PRIVATE & filters.TEXT & ~filters.COMMAND, profile_bio)],
@@ -1181,7 +1182,98 @@ def main() -> None:
         handle_rejection_in_group,
     ))
 
-    logger.info("WAVARCHIVE Bot (merged) starting — polling...")
+import traceback
+
+async def error_handler(update: object, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """Логирует все необработанные исключения в консоль Railway."""
+    logger.error("Exception while handling update:\n%s",
+                 "".join(traceback.format_exception(type(ctx.error), ctx.error, ctx.error.__traceback__)))
+    if isinstance(update, Update) and update.effective_message:
+        try:
+            await update.effective_message.reply_text("⚠️ Внутренняя ошибка. Попробуй ещё раз или напиши /start")
+        except Exception:
+            pass
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  MAIN
+# ══════════════════════════════════════════════════════════════════════════════
+
+def main() -> None:
+    init_db()
+
+    app = Application.builder().token(BOT_TOKEN).build()
+
+    # Удаляем вебхук при старте — на случай если старый бот его ставил
+    async def on_startup(app):
+        await app.bot.delete_webhook(drop_pending_updates=False)
+        me = await app.bot.get_me()
+        logger.info("Bot started: @%s  admins: %s", me.username, ADMIN_IDS)
+
+    app.post_init = on_startup
+    app.add_error_handler(error_handler)
+
+    PRIVATE = filters.ChatType.PRIVATE
+
+    # Track upload conversation
+    upload_conv = ConversationHandler(
+        entry_points=[
+            MessageHandler(PRIVATE & filters.Regex(r"^отправить трек 📥$"), upload_start),
+            MessageHandler(PRIVATE & filters.Regex(r"^отправить файл 📥$"), upload_start),
+        ],
+        states={
+            TITLE:  [MessageHandler(PRIVATE & filters.TEXT & ~filters.COMMAND, upload_title)],
+            ARTIST: [MessageHandler(PRIVATE & filters.TEXT & ~filters.COMMAND, upload_artist)],
+            ALBUM:  [MessageHandler(PRIVATE & filters.TEXT & ~filters.COMMAND, upload_album)],
+            COVER:  [MessageHandler(
+                PRIVATE & (filters.PHOTO | filters.Document.IMAGE | filters.TEXT) & ~filters.COMMAND,
+                upload_cover,
+            )],
+            FILE: [MessageHandler(
+                PRIVATE & (filters.AUDIO | filters.Document.ALL) & ~filters.COMMAND,
+                upload_file,
+            )],
+        },
+        fallbacks=[CommandHandler("cancel", upload_cancel)],
+        allow_reentry=True,
+    )
+
+    # Profile edit conversation
+    profile_conv = ConversationHandler(
+        entry_points=[
+            CommandHandler("profile", profile_start, filters=PRIVATE),
+            CallbackQueryHandler(profile_start, pattern="^edit_profile$"),
+        ],
+        states={
+            P_NAME:  [MessageHandler(PRIVATE & filters.TEXT & ~filters.COMMAND, profile_name)],
+            P_BIO:   [MessageHandler(PRIVATE & filters.TEXT & ~filters.COMMAND, profile_bio)],
+            P_PHOTO: [MessageHandler(
+                PRIVATE & (filters.PHOTO | filters.TEXT) & ~filters.COMMAND, profile_photo
+            )],
+            P_LINKS: [MessageHandler(PRIVATE & filters.TEXT & ~filters.COMMAND, profile_links)],
+        },
+        fallbacks=[CommandHandler("cancel", upload_cancel)],
+        allow_reentry=True,
+    )
+
+    app.add_handler(CommandHandler("start",     cmd_start,         filters=PRIVATE))
+    app.add_handler(CommandHandler("cancel",    cmd_cancel_global, filters=PRIVATE))
+    app.add_handler(CommandHandler("stats",     cmd_stats))
+    app.add_handler(CommandHandler("pending",   cmd_pending))
+    app.add_handler(CommandHandler("import_db", cmd_import_db))
+    app.add_handler(upload_conv)
+    app.add_handler(profile_conv)
+    app.add_handler(CallbackQueryHandler(
+        handle_callback,
+        pattern=r"^(approve|reject|sub|unsub|disc|card|show)_",
+    ))
+    app.add_handler(MessageHandler(PRIVATE & filters.TEXT & ~filters.COMMAND, handle_text))
+    app.add_handler(MessageHandler(
+        (filters.Chat(MODERATION_CHAT_ID) | filters.Chat(list(ADMIN_IDS))) & filters.TEXT & ~filters.COMMAND,
+        handle_rejection_in_group,
+    ))
+
+    logger.info("WAVARCHIVE Bot starting — polling...")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 
