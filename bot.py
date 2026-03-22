@@ -804,15 +804,22 @@ async def handle_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> Non
         except Exception:
             pass
         if track["file_id"]:
-            try:
-                await query.message.chat.send_audio(
-                    track["file_id"], caption=cap,
-                    reply_markup=InlineKeyboardMarkup(kb), parse_mode="HTML",
-                )
-            except Exception:
-                await query.message.chat.send_document(
-                    track["file_id"], caption=cap,
-                    reply_markup=InlineKeyboardMarkup(kb), parse_mode="HTML",
+            sent = False
+            for send_fn in (query.message.chat.send_audio, query.message.chat.send_document):
+                try:
+                    await send_fn(
+                        track["file_id"], caption=cap,
+                        reply_markup=InlineKeyboardMarkup(kb), parse_mode="HTML",
+                    )
+                    sent = True
+                    break
+                except Exception:
+                    pass
+            if not sent:
+                # file_id от старого бота — показываем без файла
+                cap += "\n\n⚠️ <i>Файл недоступен (привязан к старому боту). Артист должен загрузить трек заново.</i>"
+                await query.message.chat.send_message(
+                    cap, reply_markup=InlineKeyboardMarkup(kb), parse_mode="HTML"
                 )
         else:
             await query.message.chat.send_message(
