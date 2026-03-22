@@ -678,17 +678,25 @@ async def handle_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> Non
             channel_url = ""
             if CHANNEL_ID:
                 try:
-                    pub = await ctx.bot.send_audio(
-                        CHANNEL_ID, sub["file_id"],
-                        caption=(
-                            f"🎵 <b>{sub['title']}</b> — {sub['artist']}\n\n"
-                            f"🌐 <a href='{SITE_URL}'>WAVARCHIVE</a>"
-                        ),
-                        parse_mode="HTML",
+                    caption_text = (
+                        f"🎵 <b>{sub['title']}</b> — {sub['artist']}\n\n"
+                        f"🌐 <a href='{SITE_URL}'>WAVARCHIVE</a>"
                     )
+                    # Пробуем как audio, если не вышло — как document
+                    try:
+                        pub = await ctx.bot.send_audio(
+                            CHANNEL_ID, sub["file_id"],
+                            caption=caption_text, parse_mode="HTML",
+                        )
+                    except Exception:
+                        pub = await ctx.bot.send_document(
+                            CHANNEL_ID, sub["file_id"],
+                            caption=caption_text, parse_mode="HTML",
+                        )
                     channel_url = f"https://t.me/{CHANNEL_ID.lstrip('@')}/{pub.message_id}"
+                    logger.info("Posted to channel: %s", channel_url)
                 except Exception as e:
-                    logger.warning("Channel post failed: %s", e)
+                    logger.error("Channel post failed: %s", e)
 
             save_track(
                 user_id, sub["title"], sub["artist"], sub.get("album", ""),
@@ -777,8 +785,10 @@ async def handle_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> Non
                 await query.edit_message_caption(text, reply_markup=InlineKeyboardMarkup(new_kb), parse_mode="HTML")
             else:
                 await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(new_kb), parse_mode="HTML")
-        except Exception:
-            pass
+        except Exception as e:
+            logger.error("Subscribe edit message failed: %s", e)
+            # Сообщение не изменилось, но подписка сохранена — сообщим пользователю
+            await query.answer("✅ Готово!" if action == "sub" else "✅ Отписался!", show_alert=True)
 
     # ── Discography navigation ─────────────────────────────────────────────────
     elif data.startswith("disc_"):
@@ -1082,10 +1092,18 @@ async def _do_import(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         for row in data.get("artists", []):
             try:
                 conn.execute("""
-                    INSERT OR IGNORE INTO artists
+                    INSERT INTO artists
                     (user_id, slug, name, bio, photo_id, links,
                      is_allowed, first_song, subscribers_count, created_at)
                     VALUES (?,?,?,?,?,?,?,?,?,?)
+                    ON CONFLICT(user_id) DO UPDATE SET
+                        name              = excluded.name,
+                        bio               = excluded.bio,
+                        photo_id          = excluded.photo_id,
+                        links             = excluded.links,
+                        is_allowed        = excluded.is_allowed,
+                        first_song        = excluded.first_song,
+                        subscribers_count = excluded.subscribers_count
                 """, (
                     row["user_id"], row["slug"], row.get("name"), row.get("bio"),
                     row.get("photo_id"), row.get("links"),
