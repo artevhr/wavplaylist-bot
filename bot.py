@@ -1045,17 +1045,36 @@ async def cmd_pending(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 async def cmd_import_db(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     if update.effective_user.id not in ADMIN_IDS:
         return
-    if not update.message.document:
-        await update.message.reply_text(
-            "Пришли файл export.json — он лежит в том же архиве что и bot.py"
-        )
+
+    # Если файл прикреплён сразу к команде
+    if update.message.document:
+        await _do_import(update, ctx)
         return
 
-    await update.message.reply_text("⏳ Импортирую...")
+    # Иначе — ждём файл следующим сообщением
+    ctx.bot_data["awaiting_import"] = update.effective_user.id
+    await update.message.reply_text("📎 Теперь пришли файл export.json")
 
-    tg_file = await ctx.bot.get_file(update.message.document.file_id)
-    with urllib.request.urlopen(tg_file.file_path, timeout=30) as r:
-        data = json.loads(r.read())
+
+async def handle_import_document(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """Ловит export.json после команды /import_db."""
+    if ctx.bot_data.get("awaiting_import") != update.effective_user.id:
+        return
+    if update.effective_user.id not in ADMIN_IDS:
+        return
+    del ctx.bot_data["awaiting_import"]
+    await _do_import(update, ctx)
+
+
+async def _do_import(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    await update.message.reply_text("⏳ Импортирую...")
+    try:
+        tg_file = await ctx.bot.get_file(update.message.document.file_id)
+        with urllib.request.urlopen(tg_file.file_path, timeout=30) as r:
+            data = json.loads(r.read())
+    except Exception as e:
+        await update.message.reply_text(f"❌ Не удалось прочитать файл: {e}")
+        return
 
     artists_ok = tracks_ok = subs_ok = 0
 
@@ -1085,7 +1104,7 @@ async def cmd_import_db(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
                     VALUES (?,?,?,?,?)
                 """, (
                     row["user_id"], row["track_name"], row.get("file_id"),
-                    row.get("track_url", ""),   # старое поле → channel_url
+                    row.get("track_url", ""),
                     row.get("published_at"),
                 ))
                 tracks_ok += 1
@@ -1106,81 +1125,10 @@ async def cmd_import_db(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         f"✅ <b>Импорт завершён!</b>\n\n"
         f"👤 Артистов: <b>{artists_ok}</b>\n"
         f"🎵 Треков: <b>{tracks_ok}</b>\n"
-        f"❤️ Подписок: <b>{subs_ok}</b>\n\n"
-        f"Команду /import_db можно удалить из кода.",
+        f"❤️ Подписок: <b>{subs_ok}</b>",
         parse_mode="HTML",
     )
 
-
-# ══════════════════════════════════════════════════════════════════════════════
-#  MAIN
-# ══════════════════════════════════════════════════════════════════════════════
-
-def main() -> None:
-    init_db()
-
-    app = Application.builder().token(BOT_TOKEN).build()
-
-    PRIVATE = filters.ChatType.PRIVATE
-
-    # Track upload conversation
-    upload_conv = ConversationHandler(
-        entry_points=[
-            MessageHandler(PRIVATE & filters.Regex(r"^отправить трек 📥$"), upload_start),
-            MessageHandler(PRIVATE & filters.Regex(r"^отправить файл 📥$"), upload_start),
-        ],
-        states={
-            TITLE:  [MessageHandler(PRIVATE & filters.TEXT & ~filters.COMMAND, upload_title)],
-            ARTIST: [MessageHandler(PRIVATE & filters.TEXT & ~filters.COMMAND, upload_artist)],
-            ALBUM:  [MessageHandler(PRIVATE & filters.TEXT & ~filters.COMMAND, upload_album)],
-            COVER:  [MessageHandler(
-                PRIVATE & (filters.PHOTO | filters.Document.IMAGE | filters.TEXT) & ~filters.COMMAND,
-                upload_cover,
-            )],
-            FILE: [MessageHandler(
-                PRIVATE & (filters.AUDIO | filters.Document.ALL) & ~filters.COMMAND,
-                upload_file,
-            )],
-        },
-        fallbacks=[CommandHandler("cancel", upload_cancel)],
-        allow_reentry=True,
-    )
-
-    # Profile edit conversation
-    profile_conv = ConversationHandler(
-        entry_points=[
-            CommandHandler("profile", profile_start, filters=PRIVATE),
-            CallbackQueryHandler(profile_start, pattern="^edit_profile$"),
-        ],
-        per_message=False,
-        states={
-            P_NAME:  [MessageHandler(PRIVATE & filters.TEXT & ~filters.COMMAND, profile_name)],
-            P_BIO:   [MessageHandler(PRIVATE & filters.TEXT & ~filters.COMMAND, profile_bio)],
-            P_PHOTO: [MessageHandler(
-                PRIVATE & (filters.PHOTO | filters.TEXT) & ~filters.COMMAND, profile_photo
-            )],
-            P_LINKS: [MessageHandler(PRIVATE & filters.TEXT & ~filters.COMMAND, profile_links)],
-        },
-        fallbacks=[CommandHandler("cancel", upload_cancel)],
-        allow_reentry=True,
-    )
-
-    app.add_handler(CommandHandler("start",   cmd_start,      filters=PRIVATE))
-    app.add_handler(CommandHandler("cancel",  cmd_cancel_global, filters=PRIVATE))
-    app.add_handler(CommandHandler("stats",   cmd_stats))
-    app.add_handler(CommandHandler("pending", cmd_pending))
-    app.add_handler(CommandHandler("import_db", cmd_import_db))
-    app.add_handler(upload_conv)
-    app.add_handler(profile_conv)
-    app.add_handler(CallbackQueryHandler(
-        handle_callback,
-        pattern=r"^(approve|reject|sub|unsub|disc|card|show)_",
-    ))
-    app.add_handler(MessageHandler(PRIVATE & filters.TEXT & ~filters.COMMAND, handle_text))
-    app.add_handler(MessageHandler(
-        (filters.Chat(MODERATION_CHAT_ID) | filters.Chat(list(ADMIN_IDS))) & filters.TEXT & ~filters.COMMAND,
-        handle_rejection_in_group,
-    ))
 
 import traceback
 
@@ -1261,6 +1209,10 @@ def main() -> None:
     app.add_handler(CommandHandler("stats",     cmd_stats))
     app.add_handler(CommandHandler("pending",   cmd_pending))
     app.add_handler(CommandHandler("import_db", cmd_import_db))
+    # Ловим файл после /import_db (приоритет 1 — раньше upload_conv)
+    app.add_handler(MessageHandler(
+        PRIVATE & filters.Document.ALL, handle_import_document
+    ), group=0)
     app.add_handler(upload_conv)
     app.add_handler(profile_conv)
     app.add_handler(CallbackQueryHandler(
