@@ -794,16 +794,16 @@ async def handle_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> Non
 
         cap = (
             f"💿 <b>{track['track_name']}</b>"
-            + (f"\n<i>{track['album']}</i>" if track.get("album") else "")
+            + (f"\n<i>{track['album']}</i>" if track["album"] else "")
             + (f"\n\n🔗 <a href='{track['channel_url']}'>слушать</a>"
-               if track.get("channel_url") else "")
+               if track["channel_url"] else "")
             + f"\n<i>{idx+1} из {len(tracks)}</i>"
         )
         try:
             await query.message.delete()
         except Exception:
             pass
-        if track.get("file_id"):
+        if track["file_id"]:
             try:
                 await query.message.chat.send_audio(
                     track["file_id"], caption=cap,
@@ -894,7 +894,7 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         kb = InlineKeyboardMarkup([[
             InlineKeyboardButton("✏️ Редактировать", callback_data="edit_profile")
         ]])
-        if a.get("photo_id"):
+        if a["photo_id"]:
             try:
                 await update.message.reply_photo(
                     a["photo_id"], caption=card, reply_markup=kb, parse_mode="HTML"
