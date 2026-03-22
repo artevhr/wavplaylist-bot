@@ -31,15 +31,19 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ── Config (from Railway env vars) ────────────────────────────────────────────
-BOT_TOKEN     = os.environ["BOT_TOKEN"]
-ADMIN_ID      = int(os.environ["ADMIN_ID"])
+BOT_TOKEN  = os.environ["BOT_TOKEN"]
+# Один ID или несколько через запятую: "111,222,333"
+ADMIN_IDS  = {int(x.strip()) for x in os.environ.get("ADMIN_IDS", os.environ.get("ADMIN_ID", "0")).split(",")}
+ADMIN_ID   = next(iter(ADMIN_IDS))  # первый — для обратной совместимости
 GITHUB_TOKEN  = os.environ["GITHUB_TOKEN"]
 GITHUB_OWNER  = os.environ.get("GITHUB_OWNER", "artevhr")
 GITHUB_REPO   = os.environ.get("GITHUB_REPO",  "wavarchive-music")
 SITE_URL      = os.environ.get("SITE_URL", f"https://{GITHUB_OWNER}.github.io/wavarchive-site/")
-CHANNEL_ID    = os.environ.get("CHANNEL_ID", "")        # optional: @channel_username
-RULES_LINK    = os.environ.get("RULES_LINK", "")        # optional
-DB_PATH       = os.environ.get("DB_PATH", "database.db")
+CHANNEL_ID         = os.environ.get("CHANNEL_ID", "")           # optional: @channel_username
+RULES_LINK         = os.environ.get("RULES_LINK", "")           # optional
+DB_PATH            = os.environ.get("DB_PATH", "database.db")
+# Группа для модерации треков. Если не задана — бот пишет в личку ADMIN_ID.
+MODERATION_CHAT_ID = int(os.environ.get("MODERATION_CHAT_ID", ADMIN_ID))
 
 # ── ConversationHandler state IDs ─────────────────────────────────────────────
 # Track upload
@@ -534,10 +538,10 @@ async def upload_file(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
     ]])
 
     if d.get("cover_file_id"):
-        await ctx.bot.send_photo(ADMIN_ID, d["cover_file_id"], caption="⬆️ Обложка трека")
+        await ctx.bot.send_photo(MODERATION_CHAT_ID, d["cover_file_id"], caption="⬆️ Обложка трека")
 
     admin_msg = await ctx.bot.send_document(
-        ADMIN_ID, fid, caption=caption, reply_markup=kb, parse_mode="HTML"
+        MODERATION_CHAT_ID, fid, caption=caption, reply_markup=kb, parse_mode="HTML"
     )
     pending[d["from_id"]] = {**d, "admin_msg_id": admin_msg.message_id}
 
@@ -646,7 +650,7 @@ async def handle_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> Non
 
     # ── Admin: approve ─────────────────────────────────────────────────────────
     if data.startswith("approve_"):
-        if viewer_id != ADMIN_ID:
+        if not await _is_moderator(ctx, viewer_id):
             await query.answer("Нет доступа", show_alert=True)
             return
 
@@ -695,7 +699,8 @@ async def handle_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> Non
                 except Exception:
                     pass
 
-            await _edit_caption(query, "\n\n✅ ПОДТВЕРЖДЕНО И ДОБАВЛЕНО")
+            moderator_name = update.effective_user.first_name
+            await _edit_caption(query, f"\n\n✅ ПОДТВЕРЖДЕНО — @{update.effective_user.username or moderator_name}")
             await ctx.bot.send_message(
                 user_id,
                 f"🎉 Трек <b>{sub['title']}</b> одобрен и добавлен на WAVARCHIVE!\n\n"
@@ -711,7 +716,7 @@ async def handle_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> Non
 
     # ── Admin: reject ──────────────────────────────────────────────────────────
     elif data.startswith("reject_"):
-        if viewer_id != ADMIN_ID:
+        if not await _is_moderator(ctx, viewer_id):
             await query.answer("Нет доступа", show_alert=True)
             return
 
@@ -722,9 +727,11 @@ async def handle_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> Non
             return
 
         ctx.bot_data[f"reject_{user_id}"] = sub
+        # Просим написать причину прямо в группе модерации
         await ctx.bot.send_message(
-            ADMIN_ID,
-            f"📝 Напиши причину отклонения трека «{sub['title']}» (или «—» без причины):",
+            MODERATION_CHAT_ID,
+            f"📝 @{update.effective_user.username or update.effective_user.first_name}, "
+            f"напиши причину отклонения трека «{sub['title']}» (или «—» без причины):",
         )
         await _edit_caption(query, "\n\n⏳ Жду причину отклонения...")
 
@@ -828,6 +835,19 @@ async def handle_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> Non
         await _show_artist_card(update, ctx, slug, viewer_id)
 
 
+async def _is_moderator(ctx: ContextTypes.DEFAULT_TYPE, user_id: int) -> bool:
+    """True если user_id — один из ADMIN_IDS или админ/создатель группы модерации."""
+    if user_id in ADMIN_IDS:
+        return True
+    if MODERATION_CHAT_ID == ADMIN_ID:
+        return False
+    try:
+        member = await ctx.bot.get_chat_member(MODERATION_CHAT_ID, user_id)
+        return member.status in ("administrator", "creator")
+    except Exception:
+        return False
+
+
 def _edit_caption(query, suffix: str):
     """Helper: append suffix to the current caption (fire-and-forget coroutine)."""
     return query.edit_message_caption(
@@ -842,10 +862,21 @@ def _edit_caption(query, suffix: str):
 
 async def handle_admin_rejection(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> bool:
     """Returns True if message was consumed as a rejection reason."""
-    if update.effective_user.id != ADMIN_ID:
+    # Принимаем причину из группы модерации ИЛИ от ADMIN_ID в личке
+    chat_id   = update.effective_chat.id
+    sender_id = update.effective_user.id
+    is_from_mod_chat = (chat_id == MODERATION_CHAT_ID)
+    is_from_admin    = (sender_id in ADMIN_IDS and chat_id in ADMIN_IDS)
+
+    if not (is_from_mod_chat or is_from_admin):
         return False
+
     waiting = {k: v for k, v in ctx.bot_data.items() if k.startswith("reject_")}
     if not waiting:
+        return False
+
+    # Доп. проверка: в группе — только модераторы
+    if is_from_mod_chat and not await _is_moderator(ctx, sender_id):
         return False
 
     key, sub = next(iter(waiting.items()))
@@ -981,7 +1012,7 @@ async def _show_search_results(update: Update, results: list, query: str) -> Non
 # ══════════════════════════════════════════════════════════════════════════════
 
 async def cmd_stats(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    if update.effective_user.id != ADMIN_ID:
+    if update.effective_user.id not in ADMIN_IDS:
         return
     with _db() as conn:
         artists = conn.execute("SELECT COUNT(*) FROM artists WHERE first_song=1").fetchone()[0]
@@ -999,7 +1030,7 @@ async def cmd_stats(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def cmd_pending(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    if update.effective_user.id != ADMIN_ID:
+    if update.effective_user.id not in ADMIN_IDS:
         return
     if not pending:
         await update.message.reply_text("✅ Очередь пуста.")
